@@ -399,61 +399,57 @@ if (MCP_MODE === "stdio") {
   const transports = new Map<string, SSEServerTransport>();
 
   app.get("/sse", async (req, res) => {
-    console.log(`[${new Date().toISOString()}] New SSE attempt from ${req.ip}`);
+    // Determine the base URL for messages. Use the production domain if available.
+    const baseUrl = process.env.NODE_ENV === 'production'
+      ? "https://mcp-server.dydlabs.com"
+      : `http://localhost:${PORT}`;
 
-    // SSE headers
+    console.log(`[${new Date().toISOString()}] SSE connection attempt. Origin: ${req.headers.origin}`);
+
+    // CORS & SSE headers - must be set before transport creation
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no'); // Disable buffering for Nginx/proxies
+    res.setHeader('X-Accel-Buffering', 'no');
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-mcp-protocol-version');
 
-    // Send initial comment to flush any buffers
-    res.write(': keep-alive\n\n');
-
-    const transport = new SSEServerTransport("/messages", res);
+    // SSEServerTransport handles creating the sessionId and sending the initial 'endpoint' event
+    // Using a full URL ensures proxies don't misroute the POST messages
+    const transport = new SSEServerTransport(`${baseUrl}/messages`, res);
     const sessionId = transport.sessionId;
     transports.set(sessionId, transport);
+
     console.log(`[${new Date().toISOString()}] SSE session started: ${sessionId}`);
 
-    // Keep-alive heartbeat every 30 seconds to prevent proxy timeouts
     const heartbeat = setInterval(() => {
       res.write(': heartbeat\n\n');
     }, 30000);
 
     await server.connect(transport);
 
-    // Clean up when connection closes
     res.on("close", () => {
       console.log(`[${new Date().toISOString()}] SSE connection closed: ${sessionId}`);
       clearInterval(heartbeat);
-      // Give a larger grace period (10s) for any late messages
-      setTimeout(() => transports.delete(sessionId), 10000);
+      setTimeout(() => transports.delete(sessionId), 15000); // 15s grace period
     });
   });
 
   app.post("/messages", async (req, res) => {
     const sessionId = req.query.sessionId as string;
-
-    if (!sessionId) {
-      console.error(`[${new Date().toISOString()}] Received message post without sessionId`);
-      return res.status(400).send("Missing sessionId query parameter");
-    }
-
     const transport = transports.get(sessionId);
 
     if (transport) {
-      console.log(`[${new Date().toISOString()}] Processing message for session: ${sessionId}`);
       try {
         await transport.handlePostMessage(req, res);
       } catch (err: any) {
-        console.error(`[${new Date().toISOString()}] Error handling post message: ${err.message}`);
+        console.error(`[${new Date().toISOString()}] Post message error: ${err.message}`);
         res.status(500).send(err.message);
       }
     } else {
-      const activeSessions = Array.from(transports.keys()).join(", ");
-      console.error(`[${new Date().toISOString()}] Session not found for ID: ${sessionId}. Current active sessions: ${activeSessions}`);
-      res.status(400).send(`No active SSE transport for session: ${sessionId}. The session might have expired or you might be hitting a different instance of the server.`);
+      console.error(`[${new Date().toISOString()}] Session ${sessionId} not found. Active: ${Array.from(transports.keys()).length}`);
+      res.status(400).send("Session not found or expired. Please reconnect to /sse");
     }
   });
 
