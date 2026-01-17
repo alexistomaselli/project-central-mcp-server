@@ -1,6 +1,7 @@
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -85,6 +86,22 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: "update_issue",
+        description: "Update any property of an existing issue (title, description, priority, status, assignees)",
+        inputSchema: {
+          type: "object",
+          properties: {
+            issue_id: { type: "string", description: "The UUID of the issue" },
+            title: { type: "string", description: "New title" },
+            description: { type: "string", description: "New description" },
+            priority: { type: "string", enum: ["low", "medium", "high", "urgent"] },
+            status: { type: "string", enum: ["todo", "in_progress", "review", "done"] },
+            assignees: { type: "array", items: { type: "string" }, description: "List of usernames assigned" }
+          },
+          required: ["issue_id"],
+        },
+      },
+      {
         name: "list_all_projects",
         description: "List all software projects currently being managed",
         inputSchema: { type: "object", properties: {} },
@@ -99,6 +116,31 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
           required: ["project_name"],
         },
+      },
+      {
+        name: "list_issues",
+        description: "List issues across all projects or filtered by status, priority or project name",
+        inputSchema: {
+          type: "object",
+          properties: {
+            project_name: { type: "string", description: "Filter by project name (optional)" },
+            status: { type: "string", enum: ["todo", "in_progress", "review", "done"], description: "Filter by status" },
+            priority: { type: "string", enum: ["low", "medium", "high", "urgent"], description: "Filter by priority" }
+          }
+        }
+      },
+      {
+        name: "add_issue_comment",
+        description: "Add a comment to a specific issue",
+        inputSchema: {
+          type: "object",
+          properties: {
+            issue_id: { type: "string", description: "The UUID of the issue" },
+            author_name: { type: "string", description: "Name of the comment author" },
+            content: { type: "string", description: "The content of the comment" }
+          },
+          required: ["issue_id", "author_name", "content"]
+        }
       }
     ],
   };
@@ -189,7 +231,37 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }]);
 
         return {
-          content: [{ type: "text", text: `Status of issue "${issue.title}" updated to ${args.status as string}.` }],
+          content: [{ type: "text", text: `✅ Status of issue "${issue.title}" updated to ${args.status as string}.` }],
+        };
+      }
+
+      case "update_issue": {
+        if (!args) throw new Error("Arguments are required for update_issue");
+        const updates: any = {};
+        if (args.title) updates.title = args.title;
+        if (args.description) updates.description = args.description;
+        if (args.priority) updates.priority = args.priority;
+        if (args.status) updates.status = args.status;
+        if (args.assignees) updates.assigned_to = args.assignees;
+
+        const { data: issue, error: iErr } = await supabase
+          .from("issues")
+          .update(updates)
+          .eq("id", args.issue_id as string)
+          .select("id, title, project_id")
+          .single();
+
+        if (iErr) throw iErr;
+
+        await supabase.from("activities").insert([{
+          project_id: issue.project_id,
+          issue_id: issue.id,
+          action: "issue_updated",
+          details: { title: issue.title, updated_fields: Object.keys(updates) }
+        }]);
+
+        return {
+          content: [{ type: "text", text: `✅ Issue "${issue.title}" has been updated successfully.` }],
         };
       }
 
@@ -243,6 +315,61 @@ ${activityList || "  No activity logged yet."}
         };
       }
 
+      case "list_issues": {
+        let query = supabase.from("issues").select("*, projects(name)");
+
+        if (args?.status) query = query.eq("status", args.status);
+        if (args?.priority) query = query.eq("priority", args.priority);
+        if (args?.project_name) {
+          const { data: proj } = await supabase.from("projects").select("id").ilike("name", `%${args.project_name}%`).single();
+          if (proj) query = query.eq("project_id", proj.id);
+        }
+
+        const { data: issues, error } = await query.order("created_at", { ascending: false });
+        if (error) throw error;
+
+        const list = (issues || []).map(i => `- [${(i.projects as any)?.name}] **${i.title}** | Status: ${i.status.toUpperCase()} | Priority: ${i.priority.toUpperCase()} (ID: ${i.id})`).join("\n");
+
+        return {
+          content: [{ type: "text", text: list || "No se encontraron tareas con esos filtros." }],
+        };
+      }
+
+      case "add_issue_comment": {
+        if (!args) throw new Error("Arguments are required for add_issue_comment");
+        const { data: comm, error: cErr } = await supabase
+          .from("comments")
+          .insert([{
+            issue_id: args.issue_id as string,
+            author_name: (args.author_name as string) || "Assistant",
+            content: args.content as string
+          }])
+          .select()
+          .single();
+
+        if (cErr) throw cErr;
+
+        // Log activity too
+        const { data: issue } = await supabase
+          .from("issues")
+          .select("project_id, title")
+          .eq("id", args.issue_id as string)
+          .single();
+
+        if (issue) {
+          await supabase.from("activities").insert([{
+            project_id: issue.project_id,
+            issue_id: comm.issue_id,
+            action: "commented",
+            details: { title: issue.title, comment: (args.content as string).slice(0, 50) }
+          }]);
+        }
+
+        return {
+          content: [{ type: "text", text: `💬 Comment added to issue "${issue?.title || comm.issue_id}".` }],
+        };
+      }
+
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -254,31 +381,40 @@ ${activityList || "  No activity logged yet."}
   }
 });
 
-// --- Express / SSE Setup ---
+// --- Universal Transport Setup ---
 
-const app = express();
-app.use(cors());
+const MCP_MODE = process.env.MCP_MODE || "sse";
 
-let transport: SSEServerTransport | null = null;
-
-app.get("/sse", async (req, res) => {
-  console.log("New SSE connection established");
-  transport = new SSEServerTransport("/messages", res);
+if (MCP_MODE === "stdio") {
+  const transport = new StdioServerTransport();
   await server.connect(transport);
-});
+  console.error("MCP Project Central Server running on stdio");
+} else {
+  // --- Express / SSE Setup ---
+  const app = express();
+  app.use(cors());
 
-app.post("/messages", async (req, res) => {
-  console.log("Received post message");
-  if (transport) {
-    await transport.handlePostMessage(req, res);
-  } else {
-    res.status(400).send("No active SSE transport");
-  }
-});
+  let transport: SSEServerTransport | null = null;
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`MCP Project Central Server running on http://0.0.0.0:${PORT}`);
-  console.log(`SSE endpoint: http://0.0.0.0:${PORT}/sse`);
-  console.log(`Message endpoint: http://0.0.0.0:${PORT}/messages`);
-});
+  app.get("/sse", async (req, res) => {
+    console.log("New SSE connection established");
+    transport = new SSEServerTransport("/messages", res);
+    await server.connect(transport);
+  });
+
+  app.post("/messages", async (req, res) => {
+    console.log("Received post message");
+    if (transport) {
+      await transport.handlePostMessage(req, res);
+    } else {
+      res.status(400).send("No active SSE transport");
+    }
+  });
+
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`MCP Project Central Server running on http://0.0.0.0:${PORT}`);
+    console.log(`SSE endpoint: http://0.0.0.0:${PORT}/sse`);
+    console.log(`Message endpoint: http://0.0.0.0:${PORT}/messages`);
+  });
+}
