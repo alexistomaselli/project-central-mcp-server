@@ -395,8 +395,14 @@ if (MCP_MODE === "stdio") {
   app.use(cors());
   app.use(express.json());
 
+  const PORT = process.env.PORT || 3000;
+
   // Map to store transports by sessionId
   const transports = new Map<string, SSEServerTransport>();
+
+  app.get("/health", (req, res) => {
+    res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
+  });
 
   app.get("/sse", async (req, res) => {
     // Determine the base URL for messages. Use the production domain if available.
@@ -453,10 +459,10 @@ if (MCP_MODE === "stdio") {
     }
   });
 
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => {
+  app.listen(Number(PORT), "0.0.0.0", () => {
     console.log(`[${new Date().toISOString()}] MCP Project Central Server running on port ${PORT}`);
     console.log(`[${new Date().toISOString()}] SSE endpoint: /sse`);
     console.log(`[${new Date().toISOString()}] Message endpoint: /messages`);
+    console.log(`[${new Date().toISOString()}] Health endpoint: /health`);
   });
 }
