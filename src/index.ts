@@ -403,22 +403,32 @@ if (MCP_MODE === "stdio") {
 
     // SSE headers
     res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no'); // Disable buffering for Nginx/proxies
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    // Send initial comment to flush any buffers
+    res.write(': keep-alive\n\n');
 
     const transport = new SSEServerTransport("/messages", res);
     const sessionId = transport.sessionId;
     transports.set(sessionId, transport);
     console.log(`[${new Date().toISOString()}] SSE session started: ${sessionId}`);
 
+    // Keep-alive heartbeat every 30 seconds to prevent proxy timeouts
+    const heartbeat = setInterval(() => {
+      res.write(': heartbeat\n\n');
+    }, 30000);
+
     await server.connect(transport);
 
     // Clean up when connection closes
     res.on("close", () => {
       console.log(`[${new Date().toISOString()}] SSE connection closed: ${sessionId}`);
-      // Give a small grace period for any late messages before deleting
-      setTimeout(() => transports.delete(sessionId), 1000);
+      clearInterval(heartbeat);
+      // Give a larger grace period (10s) for any late messages
+      setTimeout(() => transports.delete(sessionId), 10000);
     });
   });
 
@@ -434,9 +444,15 @@ if (MCP_MODE === "stdio") {
 
     if (transport) {
       console.log(`[${new Date().toISOString()}] Processing message for session: ${sessionId}`);
-      await transport.handlePostMessage(req, res);
+      try {
+        await transport.handlePostMessage(req, res);
+      } catch (err: any) {
+        console.error(`[${new Date().toISOString()}] Error handling post message: ${err.message}`);
+        res.status(500).send(err.message);
+      }
     } else {
-      console.error(`[${new Date().toISOString()}] Session not found for ID: ${sessionId}. Current active sessions: ${Array.from(transports.keys()).join(", ")}`);
+      const activeSessions = Array.from(transports.keys()).join(", ");
+      console.error(`[${new Date().toISOString()}] Session not found for ID: ${sessionId}. Current active sessions: ${activeSessions}`);
       res.status(400).send(`No active SSE transport for session: ${sessionId}. The session might have expired or you might be hitting a different instance of the server.`);
     }
   });
