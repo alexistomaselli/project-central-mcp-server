@@ -397,41 +397,30 @@ if (MCP_MODE === "stdio") {
 
   const PORT = process.env.PORT || 3000;
 
-  // Map to store transports by sessionId
-  const transports = new Map<string, SSEServerTransport>();
-
-  app.get("/", (req, res) => {
-    res.status(200).send("MCP Project Central Server is running. Use /sse for MCP connection.");
-  });
-
+  // Health checks and index at the very top
   app.get("/health", (req, res) => {
     res.status(200).json({ status: "ok" });
   });
 
+  app.get("/", (req, res) => {
+    res.status(200).send("MCP Server Active");
+  });
+
+  // Map to store transports by sessionId
+  const transports = new Map<string, SSEServerTransport>();
+
   app.get("/sse", async (req, res) => {
-    // Determine the base URL for messages. Use the production domain if available.
-    const baseUrl = process.env.NODE_ENV === 'production'
-      ? "https://mcp-server.dydlabs.com"
-      : `http://localhost:${PORT}`;
+    const baseUrl = "https://mcp-server.dydlabs.com";
 
-    console.log(`[${new Date().toISOString()}] SSE connection attempt. Origin: ${req.headers.origin}`);
-
-    // CORS & SSE headers - must be set before transport creation
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-mcp-protocol-version');
 
-    // SSEServerTransport handles creating the sessionId and sending the initial 'endpoint' event
-    // Using a full URL ensures proxies don't misroute the POST messages
     const transport = new SSEServerTransport(`${baseUrl}/messages`, res);
     const sessionId = transport.sessionId;
     transports.set(sessionId, transport);
-
-    console.log(`[${new Date().toISOString()}] SSE session started: ${sessionId}`);
 
     const heartbeat = setInterval(() => {
       res.write(': heartbeat\n\n');
@@ -440,9 +429,8 @@ if (MCP_MODE === "stdio") {
     await server.connect(transport);
 
     res.on("close", () => {
-      console.log(`[${new Date().toISOString()}] SSE connection closed: ${sessionId}`);
       clearInterval(heartbeat);
-      setTimeout(() => transports.delete(sessionId), 15000); // 15s grace period
+      setTimeout(() => transports.delete(sessionId), 10000);
     });
   });
 
@@ -454,19 +442,22 @@ if (MCP_MODE === "stdio") {
       try {
         await transport.handlePostMessage(req, res);
       } catch (err: any) {
-        console.error(`[${new Date().toISOString()}] Post message error: ${err.message}`);
         res.status(500).send(err.message);
       }
     } else {
-      console.error(`[${new Date().toISOString()}] Session ${sessionId} not found. Active: ${Array.from(transports.keys()).length}`);
-      res.status(400).send("Session not found or expired. Please reconnect to /sse");
+      res.status(400).send("Session not found");
     }
   });
 
-  app.listen(PORT, () => {
-    console.log(`[${new Date().toISOString()}] MCP Project Central Server running on port ${PORT}`);
-    console.log(`[${new Date().toISOString()}] SSE endpoint: /sse`);
-    console.log(`[${new Date().toISOString()}] Message endpoint: /messages`);
-    console.log(`[${new Date().toISOString()}] Health endpoint: /health`);
+  process.on('uncaughtException', (err) => {
+    console.error('UNCAUGHT EXCEPTION:', err);
+  });
+
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('UNHANDLED REJECTION:', reason);
+  });
+
+  app.listen(Number(PORT), "0.0.0.0", () => {
+    console.log(`>>> MCP Server ready on port ${PORT}`);
   });
 }
