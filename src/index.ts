@@ -399,36 +399,45 @@ if (MCP_MODE === "stdio") {
   const transports = new Map<string, SSEServerTransport>();
 
   app.get("/sse", async (req, res) => {
-    console.log("New SSE connection established");
+    console.log(`[${new Date().toISOString()}] New SSE attempt from ${req.ip}`);
     const transport = new SSEServerTransport("/messages", res);
-    const sessionId = transport.sessionId; // SSEServerTransport generates this
+    const sessionId = transport.sessionId;
     transports.set(sessionId, transport);
+    console.log(`[${new Date().toISOString()}] SSE session started: ${sessionId}`);
 
     await server.connect(transport);
 
     // Clean up when connection closes
     res.on("close", () => {
-      console.log(`SSE connection closed: ${sessionId}`);
-      transports.delete(sessionId);
+      console.log(`[${new Date().toISOString()}] SSE connection closed: ${sessionId}`);
+      // Give a small grace period for any late messages before deleting
+      setTimeout(() => transports.delete(sessionId), 1000);
     });
   });
 
   app.post("/messages", async (req, res) => {
     const sessionId = req.query.sessionId as string;
-    console.log(`Received post message for session: ${sessionId}`);
+
+    if (!sessionId) {
+      console.error(`[${new Date().toISOString()}] Received message post without sessionId`);
+      return res.status(400).send("Missing sessionId query parameter");
+    }
+
     const transport = transports.get(sessionId);
 
     if (transport) {
+      console.log(`[${new Date().toISOString()}] Processing message for session: ${sessionId}`);
       await transport.handlePostMessage(req, res);
     } else {
-      res.status(400).send(`No active SSE transport for session: ${sessionId}`);
+      console.error(`[${new Date().toISOString()}] Session not found for ID: ${sessionId}. Current active sessions: ${Array.from(transports.keys()).join(", ")}`);
+      res.status(400).send(`No active SSE transport for session: ${sessionId}. The session might have expired or you might be hitting a different instance of the server.`);
     }
   });
 
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, () => {
-    console.log(`MCP Project Central Server running on http://0.0.0.0:${PORT}`);
-    console.log(`SSE endpoint: http://0.0.0.0:${PORT}/sse`);
-    console.log(`Message endpoint: http://0.0.0.0:${PORT}/messages`);
+    console.log(`[${new Date().toISOString()}] MCP Project Central Server running on port ${PORT}`);
+    console.log(`[${new Date().toISOString()}] SSE endpoint: /sse`);
+    console.log(`[${new Date().toISOString()}] Message endpoint: /messages`);
   });
 }
