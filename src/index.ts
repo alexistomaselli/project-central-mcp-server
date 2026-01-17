@@ -400,6 +400,13 @@ if (MCP_MODE === "stdio") {
 
   app.get("/sse", async (req, res) => {
     console.log(`[${new Date().toISOString()}] New SSE attempt from ${req.ip}`);
+
+    // SSE headers
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no'); // Disable buffering for Nginx/proxies
+
     const transport = new SSEServerTransport("/messages", res);
     const sessionId = transport.sessionId;
     transports.set(sessionId, transport);
