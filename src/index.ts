@@ -1,4 +1,4 @@
-
+console.log(">>> MCP SERVER STARTING... " + new Date().toISOString());
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -400,8 +400,12 @@ if (MCP_MODE === "stdio") {
   // Map to store transports by sessionId
   const transports = new Map<string, SSEServerTransport>();
 
+  app.get("/", (req, res) => {
+    res.status(200).send("MCP Project Central Server is running. Use /sse for MCP connection.");
+  });
+
   app.get("/health", (req, res) => {
-    res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
+    res.status(200).json({ status: "ok" });
   });
 
   app.get("/sse", async (req, res) => {
@@ -459,7 +463,7 @@ if (MCP_MODE === "stdio") {
     }
   });
 
-  app.listen(Number(PORT), "0.0.0.0", () => {
+  app.listen(PORT, () => {
     console.log(`[${new Date().toISOString()}] MCP Project Central Server running on port ${PORT}`);
     console.log(`[${new Date().toISOString()}] SSE endpoint: /sse`);
     console.log(`[${new Date().toISOString()}] Message endpoint: /messages`);
