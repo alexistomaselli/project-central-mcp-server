@@ -393,6 +393,7 @@ if (MCP_MODE === "stdio") {
   // --- Express / SSE Setup ---
   const app = express();
   app.use(cors());
+  app.use(express.json());
 
   let transport: SSEServerTransport | null = null;
 
