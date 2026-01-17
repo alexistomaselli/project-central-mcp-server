@@ -395,20 +395,33 @@ if (MCP_MODE === "stdio") {
   app.use(cors());
   app.use(express.json());
 
-  let transport: SSEServerTransport | null = null;
+  // Map to store transports by sessionId
+  const transports = new Map<string, SSEServerTransport>();
 
   app.get("/sse", async (req, res) => {
     console.log("New SSE connection established");
-    transport = new SSEServerTransport("/messages", res);
+    const transport = new SSEServerTransport("/messages", res);
+    const sessionId = transport.sessionId; // SSEServerTransport generates this
+    transports.set(sessionId, transport);
+
     await server.connect(transport);
+
+    // Clean up when connection closes
+    res.on("close", () => {
+      console.log(`SSE connection closed: ${sessionId}`);
+      transports.delete(sessionId);
+    });
   });
 
   app.post("/messages", async (req, res) => {
-    console.log("Received post message");
+    const sessionId = req.query.sessionId as string;
+    console.log(`Received post message for session: ${sessionId}`);
+    const transport = transports.get(sessionId);
+
     if (transport) {
       await transport.handlePostMessage(req, res);
     } else {
-      res.status(400).send("No active SSE transport");
+      res.status(400).send(`No active SSE transport for session: ${sessionId}`);
     }
   });
 
