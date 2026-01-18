@@ -403,14 +403,18 @@ if (MCP_MODE === "stdio") {
   });
 
   app.get("/", (req, res) => {
-    res.status(200).send("MCP Server Active");
+    res.status(200).send("MCP Server Active v1.2");
   });
 
   // Map to store transports by sessionId
   const transports = new Map<string, SSEServerTransport>();
 
   app.get("/sse", async (req, res) => {
-    const baseUrl = "https://mcp-server.dydlabs.com";
+    console.log(`>>> [SSE] Request from ${req.ip} | Headers: ${JSON.stringify(req.headers)}`);
+
+    // Explicit production URL for the message endpoint
+    // This is the most reliable way to handle proxies
+    const messageEndpoint = "https://mcp-server.dydlabs.com/messages";
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -418,34 +422,42 @@ if (MCP_MODE === "stdio") {
     res.setHeader('X-Accel-Buffering', 'no');
     res.setHeader('Access-Control-Allow-Origin', '*');
 
-    const transport = new SSEServerTransport(`${baseUrl}/messages`, res);
+    const transport = new SSEServerTransport(messageEndpoint, res);
     const sessionId = transport.sessionId;
     transports.set(sessionId, transport);
 
-    const heartbeat = setInterval(() => {
-      res.write(': heartbeat\n\n');
-    }, 30000);
+    console.log(`>>> [SSE] Started session: ${sessionId}`);
 
     await server.connect(transport);
 
     res.on("close", () => {
-      clearInterval(heartbeat);
-      setTimeout(() => transports.delete(sessionId), 10000);
+      console.log(`>>> [SSE] Connection closed for: ${sessionId}. Keeping session alive for 30s.`);
+      // Keep session in Map for 30 seconds to allow slow POSTs to finish
+      setTimeout(() => {
+        if (transports.get(sessionId) === transport) {
+          transports.delete(sessionId);
+          console.log(`>>> [SSE] Session cleaned up: ${sessionId}`);
+        }
+      }, 30000);
     });
   });
 
   app.post("/messages", async (req, res) => {
     const sessionId = req.query.sessionId as string;
+    console.log(`>>> [POST] Message for session: ${sessionId}`);
+
     const transport = transports.get(sessionId);
 
     if (transport) {
       try {
         await transport.handlePostMessage(req, res);
       } catch (err: any) {
+        console.error(`>>> [POST] Error: ${err.message}`);
         res.status(500).send(err.message);
       }
     } else {
-      res.status(400).send("Session not found");
+      console.warn(`>>> [POST] Session not found: ${sessionId}`);
+      res.status(400).send(`Session ${sessionId} not found. Reconnect to /sse.`);
     }
   });
 
