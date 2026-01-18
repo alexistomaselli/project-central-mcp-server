@@ -1,4 +1,4 @@
-console.log(">>> MCP SERVER STARTING... " + new Date().toISOString());
+console.log(">>> [v1.1-Heartbeat-Absolute] MCP SERVER STARTING... " + new Date().toISOString());
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
