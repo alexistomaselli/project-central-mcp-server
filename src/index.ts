@@ -397,48 +397,39 @@ if (MCP_MODE === "stdio") {
 
   const PORT = process.env.PORT || 3000;
 
-  // Robust CORS for all endpoints
-  app.use(cors({
-    origin: "*",
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "x-mcp-protocol-version"]
-  }));
+  app.use(cors()); // Basic wide-open CORS
+  app.use(express.json());
 
   app.get("/health", (req, res) => res.status(200).json({ status: "ok" }));
-  app.get("/", (req, res) => res.status(200).send("MCP Server Active v1.3 (n8n ready)"));
+  app.get("/", (req, res) => res.status(200).send("MCP Server Active v1.4 (Clean Handshake)"));
 
   const transports = new Map<string, SSEServerTransport>();
 
   app.get("/sse", async (req, res) => {
-    console.log(`>>> [SSE] Connection attempt. User-Agent: ${req.headers['user-agent']}`);
+    console.log(`>>> [SSE] Connection attempt from ${req.ip}`);
 
+    // Strict headers for SSE behind proxies
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
+    res.setHeader('Access-Control-Allow-Origin', '*');
 
-    // 1KB padding is enough to flush most proxies without overloading n8n
-    res.write(`: ${" ".repeat(1024)}\n\n`);
-
+    // Force absolute URL for messages endpoint
     const messageEndpoint = "https://mcp-server.dydlabs.com/messages";
+
+    // Create transport and let SDK handle the initial event
     const transport = new SSEServerTransport(messageEndpoint, res);
     const sessionId = transport.sessionId;
     transports.set(sessionId, transport);
 
-    console.log(`>>> [SSE] Session created: ${sessionId}`);
-
-    // Heartbeat is CRITICAL for n8n stability
-    const heartbeat = setInterval(() => {
-      if (!res.writableEnded) {
-        res.write(': heartbeat\n\n');
-      }
-    }, 15000);
+    console.log(`>>> [SSE] Session started: ${sessionId}`);
 
     await server.connect(transport);
 
     res.on("close", () => {
-      console.log(`>>> [SSE] Session ${sessionId} closed. Waiting 30s to cleanup.`);
-      clearInterval(heartbeat);
+      console.log(`>>> [SSE] Session closed: ${sessionId}`);
+      // Grace period for session cleanup
       setTimeout(() => {
         if (transports.get(sessionId) === transport) {
           transports.delete(sessionId);
@@ -458,19 +449,11 @@ if (MCP_MODE === "stdio") {
         res.status(500).send(err.message);
       }
     } else {
-      console.warn(`>>> [POST] Session ${sessionId} not found.`);
       res.status(400).send("Session not found");
     }
   });
 
-  process.on('uncaughtException', (err) => {
-    console.error('UNCAUGHT EXCEPTION:', err);
-  });
-
-  process.on('unhandledRejection', (reason, promise) => {
-    console.error('UNHANDLED REJECTION:', reason);
-  });
-
   app.listen(Number(PORT), "0.0.0.0", () => {
+    console.log(`>>> [v1.4] MCP Server ready on port ${PORT}`);
   });
 }
