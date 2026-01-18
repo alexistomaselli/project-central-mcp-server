@@ -397,49 +397,51 @@ if (MCP_MODE === "stdio") {
 
   const PORT = process.env.PORT || 3000;
 
-  // Health checks and index at the very top
-  app.get("/health", (req, res) => {
-    res.status(200).json({ status: "ok" });
-  });
+  // Robust CORS for all endpoints
+  app.use(cors({
+    origin: "*",
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "x-mcp-protocol-version"]
+  }));
 
-  app.get("/", (req, res) => {
-    res.status(200).send("MCP Server Active v1.2");
-  });
+  app.get("/health", (req, res) => res.status(200).json({ status: "ok" }));
+  app.get("/", (req, res) => res.status(200).send("MCP Server Active v1.3 (n8n ready)"));
 
-  // Map to store transports by sessionId
   const transports = new Map<string, SSEServerTransport>();
 
   app.get("/sse", async (req, res) => {
-    console.log(`>>> [SSE] Request from ${req.ip} | Headers: ${JSON.stringify(req.headers)}`);
-
-    // Explicit production URL for the message endpoint
-    // This is the most reliable way to handle proxies
-    const messageEndpoint = "https://mcp-server.dydlabs.com/messages";
+    console.log(`>>> [SSE] Connection attempt. User-Agent: ${req.headers['user-agent']}`);
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
-    res.setHeader('Access-Control-Allow-Origin', '*');
 
-    // 4000 bytes of padding to force proxy flushing
-    res.write(": " + " ".repeat(4000) + "\n\n");
+    // 1KB padding is enough to flush most proxies without overloading n8n
+    res.write(`: ${" ".repeat(1024)}\n\n`);
 
+    const messageEndpoint = "https://mcp-server.dydlabs.com/messages";
     const transport = new SSEServerTransport(messageEndpoint, res);
     const sessionId = transport.sessionId;
     transports.set(sessionId, transport);
 
-    console.log(`>>> [SSE] Started session: ${sessionId}`);
+    console.log(`>>> [SSE] Session created: ${sessionId}`);
+
+    // Heartbeat is CRITICAL for n8n stability
+    const heartbeat = setInterval(() => {
+      if (!res.writableEnded) {
+        res.write(': heartbeat\n\n');
+      }
+    }, 15000);
 
     await server.connect(transport);
 
     res.on("close", () => {
-      console.log(`>>> [SSE] Connection closed for: ${sessionId}. Keeping session alive for 30s.`);
-      // Keep session in Map for 30 seconds to allow slow POSTs to finish
+      console.log(`>>> [SSE] Session ${sessionId} closed. Waiting 30s to cleanup.`);
+      clearInterval(heartbeat);
       setTimeout(() => {
         if (transports.get(sessionId) === transport) {
           transports.delete(sessionId);
-          console.log(`>>> [SSE] Session cleaned up: ${sessionId}`);
         }
       }, 30000);
     });
@@ -447,20 +449,17 @@ if (MCP_MODE === "stdio") {
 
   app.post("/messages", async (req, res) => {
     const sessionId = req.query.sessionId as string;
-    console.log(`>>> [POST] Message for session: ${sessionId}`);
-
     const transport = transports.get(sessionId);
 
     if (transport) {
       try {
         await transport.handlePostMessage(req, res);
       } catch (err: any) {
-        console.error(`>>> [POST] Error: ${err.message}`);
         res.status(500).send(err.message);
       }
     } else {
-      console.warn(`>>> [POST] Session not found: ${sessionId}`);
-      res.status(400).send(`Session ${sessionId} not found. Reconnect to /sse.`);
+      console.warn(`>>> [POST] Session ${sessionId} not found.`);
+      res.status(400).send("Session not found");
     }
   });
 
@@ -473,6 +472,5 @@ if (MCP_MODE === "stdio") {
   });
 
   app.listen(Number(PORT), "0.0.0.0", () => {
-    console.log(`>>> MCP Server ready on port ${PORT}`);
   });
 }
