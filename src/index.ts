@@ -422,6 +422,9 @@ if (MCP_MODE === "stdio") {
     res.setHeader('X-Accel-Buffering', 'no');
     res.setHeader('Access-Control-Allow-Origin', '*');
 
+    // 4000 bytes of padding to force proxy flushing
+    res.write(": " + " ".repeat(4000) + "\n\n");
+
     const transport = new SSEServerTransport(messageEndpoint, res);
     const sessionId = transport.sessionId;
     transports.set(sessionId, transport);
