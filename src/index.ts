@@ -397,44 +397,43 @@ if (MCP_MODE === "stdio") {
 
   const PORT = process.env.PORT || 3000;
 
-  app.use(cors()); // Basic wide-open CORS
+  app.use(cors());
   app.use(express.json());
 
+  // 1. Global Request Logger for Debugging
+  app.use((req, res, next) => {
+    console.log(`>>> [LOG] ${new Date().toISOString()} | ${req.method} ${req.url} | UA: ${req.headers['user-agent']}`);
+    next();
+  });
+
   app.get("/health", (req, res) => res.status(200).json({ status: "ok" }));
-  app.get("/", (req, res) => res.status(200).send("MCP Server Active v1.4 (Clean Handshake)"));
+  app.get("/", (req, res) => res.status(200).send("MCP Server Active v1.5 (Buffer Buster)"));
 
   const transports = new Map<string, SSEServerTransport>();
 
   app.get("/sse", async (req, res) => {
-    console.log(`>>> [SSE] Connection attempt from ${req.ip}`);
-
-    // Strict headers for SSE behind proxies
+    // 2. Aggressive SSE Headers to bypass proxy buffering
     res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Cache-Control', 'no-cache, no-transform, no-store, must-revalidate');
     res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
+    res.setHeader('X-Accel-Buffering', 'no'); // Critical for Nginx
+    res.setHeader('Proxy-Connection', 'keep-alive');
     res.setHeader('Access-Control-Allow-Origin', '*');
 
-    // Force absolute URL for messages endpoint
+    // 3. Force absolute URL for messages endpoint
     const messageEndpoint = "https://mcp-server.dydlabs.com/messages";
 
-    // Create transport and let SDK handle the initial event
+    console.log(`>>> [SSE] Opening stream for ${req.ip}`);
+
     const transport = new SSEServerTransport(messageEndpoint, res);
     const sessionId = transport.sessionId;
     transports.set(sessionId, transport);
 
-    console.log(`>>> [SSE] Session started: ${sessionId}`);
-
     await server.connect(transport);
 
     res.on("close", () => {
-      console.log(`>>> [SSE] Session closed: ${sessionId}`);
-      // Grace period for session cleanup
-      setTimeout(() => {
-        if (transports.get(sessionId) === transport) {
-          transports.delete(sessionId);
-        }
-      }, 30000);
+      console.log(`>>> [SSE] Closed for ${sessionId}`);
+      setTimeout(() => transports.delete(sessionId), 60000); // 1 minute cleanup
     });
   });
 
@@ -449,11 +448,12 @@ if (MCP_MODE === "stdio") {
         res.status(500).send(err.message);
       }
     } else {
+      console.warn(`>>> [POST] Session NOT FOUND: ${sessionId}`);
       res.status(400).send("Session not found");
     }
   });
 
   app.listen(Number(PORT), "0.0.0.0", () => {
-    console.log(`>>> [v1.4] MCP Server ready on port ${PORT}`);
+    console.log(`>>> [v1.5] MCP Server listening on port ${PORT}`);
   });
 }
