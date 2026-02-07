@@ -1,0 +1,6 @@
+
+notebooklm-mcp
+mcp
+undetected-chromedriver
+selenium
+asyncio
