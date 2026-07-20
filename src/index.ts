@@ -1,4 +1,4 @@
-console.log(">>> [v1.1-Heartbeat-Absolute] MCP SERVER STARTING... " + new Date().toISOString());
+console.error(">>> [v1.1-Heartbeat-Absolute] MCP SERVER STARTING... " + new Date().toISOString());
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -12,6 +12,8 @@ import express from "express";
 import cors from "cors";
 import { spawn } from "child_process";
 import { generateMindMap } from "./whiteboard-gen.js";
+import { mermaidToTldraw } from "./mermaid-to-tldraw.js";
+import { financeTools, handleFinanceTool } from "./finance-tools.js";
 
 dotenv.config();
 
@@ -347,15 +349,45 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
           required: ["user_id", "notebook_id", "doc_id"]
         }
-      }
+      },
+      {
+        name: "generate_whiteboard_from_mermaid",
+        description: "Generate a tldraw whiteboard diagram from Mermaid code (flowcharts/graphs).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            project_name: { type: "string", description: "Name of the project" },
+            whiteboard_name: { type: "string", description: "Name of the new whiteboard" },
+            mermaid_code: { type: "string", description: "The Mermaid diagram syntax code (e.g. graph TD; A-->B;)" }
+          },
+          required: ["project_name", "whiteboard_name", "mermaid_code"]
+        }
+      },
+      {
+        name: "import_mermaid_to_whiteboard",
+        description: "Import and merge Mermaid diagram shapes into an EXISTING tldraw whiteboard.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            whiteboard_id: { type: "string", description: "The UUID of the existing whiteboard" },
+            mermaid_code: { type: "string", description: "The Mermaid diagram syntax code" }
+          },
+          required: ["whiteboard_id", "mermaid_code"]
+        }
+      },
+      ...financeTools
     ],
   };
 });
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
+// --- Shared Tool Handler (used by both MCP and direct HTTP invoke) ---
+async function handleTool(name: string, args: any): Promise<any> {
   try {
+    const financeResult = await handleFinanceTool(name, args, supabase);
+    if (financeResult) {
+      return financeResult;
+    }
+
     switch (name) {
       case "add_project": {
         if (!args) throw new Error("Arguments are required for add_project");
@@ -827,6 +859,92 @@ ${activityList || "  No activity logged yet."}
         };
       }
 
+      case "generate_whiteboard_from_mermaid": {
+        if (!args) throw new Error("Arguments are required for generate_whiteboard_from_mermaid");
+        
+        const whiteboardData = mermaidToTldraw(args.mermaid_code as string, args.whiteboard_name as string);
+
+        const { data: projData } = await supabase.from("projects").select("id").ilike("name", `%${args.project_name as string}%`).limit(1);
+        const proj = projData && projData.length > 0 ? projData[0] : null;
+        if (!proj) throw new Error(`Project matching "${args.project_name}" not found`);
+
+        const { data: boardData, error: bErr } = await supabase
+          .from("whiteboards")
+          .insert([{
+            project_id: proj.id,
+            name: args.whiteboard_name as string,
+            data: whiteboardData
+          }])
+          .select()
+          .limit(1);
+
+        if (bErr) throw bErr;
+        const board = boardData && boardData.length > 0 ? boardData[0] : null;
+        if (!board) throw new Error("Failed to create whiteboard");
+
+        return {
+          content: [{ type: "text", text: `📊 Whiteboard "${board.name}" generated from Mermaid code! (ID: ${board.id})` }],
+        };
+      }
+
+      case "import_mermaid_to_whiteboard": {
+        if (!args) throw new Error("Arguments are required for import_mermaid_to_whiteboard");
+        
+        // 1. Fetch existing whiteboard
+        const { data: boardData, error: fErr } = await supabase
+          .from("whiteboards")
+          .select("*")
+          .eq("id", args.whiteboard_id as string)
+          .limit(1);
+        
+        const board = boardData && boardData.length > 0 ? boardData[0] : null;
+        if (fErr || !board) throw new Error("Whiteboard not found");
+
+        // 2. Generate new shapes
+        const newWhiteboardData = mermaidToTldraw(args.mermaid_code as string, board.name);
+        
+        // 3. Merge stores
+        const existingStore = board.data?.store || {};
+        const newStore = newWhiteboardData.store;
+
+        // Merge only shapes from new store, keeping document/page/camera etc from existing if they exist
+        Object.keys(newStore).forEach(key => {
+            if (newStore[key].typeName === 'shape') {
+                existingStore[key] = newStore[key];
+            }
+        });
+
+        const mergedData = {
+            ...board.data,
+            store: existingStore
+        };
+
+        // 4. Update
+        const { error: uErr } = await supabase
+          .from("whiteboards")
+          .update({
+            data: mergedData,
+            updated_at: new Date().toISOString()
+          })
+          .eq("id", board.id);
+
+        if (uErr) throw uErr;
+
+        // Return the generated shapes so frontend can merge them directly into the editor
+        const newShapes = Object.values(newWhiteboardData.store).filter((s: any) => s.typeName === 'shape');
+
+        return {
+          content: [{ 
+            type: "text", 
+            text: JSON.stringify({ 
+              success: true,
+              message: `✅ Diagram merged into "${board.name}"!`,
+              shapes: newShapes
+            })
+          }],
+        };
+      }
+
       case "update_whiteboard": {
         if (!args) throw new Error("Arguments are required for update_whiteboard");
         const { data: boardData, error: bErr } = await supabase
@@ -941,6 +1059,11 @@ ${activityList || "  No activity logged yet."}
       isError: true,
     };
   }
+}
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params;
+  return handleTool(name, args);
 });
 
 // --- Universal Transport Setup ---
@@ -1014,8 +1137,7 @@ if (MCP_MODE === "stdio") {
   app.post("/messages/invoke", async (req, res) => {
     const { tool, arguments: args } = req.body;
     try {
-      // @ts-ignore - reaching into MCP server internals for simplified direct call
-      const result = await server.executeTool({ name: tool, arguments: args });
+      const result = await handleTool(tool, args);
       res.json(result);
     } catch (err: any) {
       console.error(`Error invoking tool ${tool}:`, err);
